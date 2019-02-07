@@ -1,0 +1,135 @@
+---
+title: "Tally votes for CytoData location"
+output: html_notebook
+---
+
+```{r message=FALSE}
+library(tidyverse)
+library(magrittr)
+```
+
+Votes are counted as follows
+
+- "Definitely will attend" and "Probably will attend" are counted as positive votes (with weights 1 and 0.75)
+- "Definitely will not attend" and "Probably will not attend" are both counted as negative votes (with weights -1 and -0.75)
+- "Undecided" is not counted
+
+To avoid large institutions dominating the polls, limits are imposed on the weighted sum of positive and negative votes per institution for a location.
+
+- A large institution is defined being in the top 15th percentile when ranked by number of respondents
+- Limits are calculated based on responses from large institutions, and then applied to all institutions
+- The *median* weighted sum of positive votes for per location, where weighted sums are per (large) institution, is calculated. The maximum of these median values across all locations is the maximum weighted sum of positive votes allowed.
+- The maximum weighted sum of negative votes is calculated similarly
+
+After applying these limits, the votes are tallied as the weighted sum of positive votes minus the weighted sum of negative votes.
+
+```{r message=FALSE}
+votes <- 
+  read_csv("~/Downloads/CytoData Symposium 2019 Host Institute (Responses) - Form Responses 2.csv")
+
+  votes %<>% select(fimm_brc,
+                    dkfz,
+                    janssen,
+                    kcl,
+                    i3s,
+                    institution)
+
+```
+
+A large institution is defined being in the top 15th percentile when ranked by number of respondents
+
+```{r}
+large_institution <-
+  votes %>%
+  group_by(institution) %>%
+  tally() %>%
+  mutate(large = percent_rank(n) > 0.85) %>% 
+  filter(large) %>%
+  select(institution)
+
+large_institution
+```
+
+- "Definitely will attend" and "Probably will attend" are counted as positive votes (with weights 1 and 0.75)
+- "Definitely will not attend" and "Probably will not attend" are both counted as negative votes (with weights -1 and -0.75)
+- "Undecided" is not counted
+
+```{r}
+votes %<>%
+  gather(location, vote, -institution) %>% 
+  mutate(
+    vote_count = 
+      case_when(
+        vote == "Definitely would not attend" ~ -1,
+        vote == "Probably would not attend" ~ -.75,
+        vote == "Undecided" ~ 0,
+        vote == "Probably would attend" ~ .75,
+        vote == "Definitely would attend" ~ 1,
+        TRUE ~ Inf
+      )
+  ) %>%
+  mutate(vote_positive = (vote_count > 0) * vote_count) %>%
+  mutate(vote_negative = (vote_count < 0) * -vote_count)
+  
+```
+
+- Limits are calculated based on responses from large institutions, and then applied to all institutions
+- The *median* weighted sum of positive votes for per location, where weighted sums are per (large) institution, is calculated. The maximum of these median values across all locations is the maximum weighted sum of positive votes allowed.
+- The maximum weighted sum of negative votes is calculated similarly
+
+So below, each institution can have no more than `limit_positive` weight sum of votes towards each location. Likewise for `limit_negative`. Note that all institutions have the same limits.
+
+```{r}
+votes %<>% 
+  group_by(institution, location) %>% 
+  summarise(sum_positive = sum(vote_positive),
+            sum_negative = sum(vote_negative)) %>%
+  ungroup()
+
+location_limits <-
+  votes %>%
+  inner_join(large_institution) %>%
+  group_by(location) %>%
+  summarize(limit_positive = median(sum_positive),
+            limit_negative = median(sum_negative))
+
+location_limits %<>%
+  mutate(limit_positive = max(limit_positive)) %>%
+  mutate(limit_negative = max(limit_negative))
+  
+location_limits
+
+votes %<>% inner_join(location_limits)
+
+```
+
+```{r}
+votes %<>%
+  mutate(sum_positive_corrected = 
+           ifelse(sum_positive > limit_positive,
+                  limit_positive,
+                  sum_positive)) %>%
+  mutate(sum_negative_corrected = 
+           ifelse(sum_negative > limit_negative,
+                  limit_negative,
+                  sum_negative)) 
+
+#check
+assertthat::are_equal(
+  votes %>% filter(sum_positive_corrected  > limit_positive) %>% nrow,
+  0)
+
+#check
+assertthat::are_equal(
+  votes %>% filter(sum_negative_corrected  > limit_negative) %>% nrow,
+  0)
+
+votes %<>%
+  group_by(location) %>%
+  summarize(score = sum(sum_positive_corrected) - sum(sum_negative_corrected)) %>%
+  ungroup() %>%
+  arrange(desc(score))
+  
+votes
+```
+
